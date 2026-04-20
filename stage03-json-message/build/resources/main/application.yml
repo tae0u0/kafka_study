@@ -1,0 +1,33 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: stage03-json-message
+
+  threads:
+    virtual:
+      enabled: true
+
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # spring-kafka 4.0: JacksonJsonSerializer (구 JsonSerializer 대체)
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+      acks: all
+      retries: 3
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # spring-kafka 4.0: JacksonJsonDeserializer (구 JsonDeserializer 대체)
+      value-deserializer: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+      group-id: stage03-group
+      auto-offset-reset: earliest
+      properties:
+        spring.json.trusted.packages: "com.kafka.stage03.dto"
+        spring.json.use.type.headers: true
+
+logging:
+  level:
+    com.kafka.stage03: DEBUG
+    org.springframework.kafka: INFO

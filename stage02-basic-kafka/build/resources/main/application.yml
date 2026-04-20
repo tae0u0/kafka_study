@@ -1,0 +1,30 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: stage02-basic-kafka
+
+  # Java 21 Virtual Threads: Tomcat/Kafka 스레드를 가상 스레드로 실행
+  # Spring Boot 4.0에서 기본 지원, I/O 바운드 작업에서 성능 향상
+  threads:
+    virtual:
+      enabled: true
+
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      retries: 3
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      group-id: stage02-group
+      auto-offset-reset: earliest
+
+logging:
+  level:
+    com.kafka.stage02: DEBUG
+    org.springframework.kafka: INFO
