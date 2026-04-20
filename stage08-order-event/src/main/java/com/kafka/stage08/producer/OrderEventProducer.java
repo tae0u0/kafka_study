@@ -7,36 +7,25 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
-/**
- * 주문 이벤트 Producer
- *
- * [핵심 원칙]
- * OrderService는 이벤트를 발행하고 즉시 리턴한다.
- * 재고 차감, 알림 전송은 각 Consumer가 비동기로 처리한다.
- * → OrderService는 Consumer들의 존재를 알 필요가 없다.
- */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class OrderEventProducer {
 
+    // 같은 KafkaTemplate 타입이 여러 개일 때는 필드명으로 Bean을 매칭한다.
+    // 필드명 "orderKafkaTemplate" == KafkaConfig의 @Bean 메서드명
     private final KafkaTemplate<String, OrderEvent> orderKafkaTemplate;
 
     public void publish(OrderEvent event) {
-        log.info("[OrderProducer] 주문 이벤트 발행 시작 - orderId: {}", event.getOrderId());
+        log.info("[OrderProducer] 주문 이벤트 발행 → topic: {}, orderId: {}",
+            KafkaConfig.ORDER_TOPIC, event.getOrderId());
 
-        long start = System.currentTimeMillis();
-
-        // key=orderId: 같은 주문의 상태 변경 이벤트가 항상 같은 파티션으로 → 순서 보장
         orderKafkaTemplate.send(KafkaConfig.ORDER_TOPIC, event.getOrderId(), event)
             .whenComplete((result, ex) -> {
                 if (ex == null) {
-                    long elapsed = System.currentTimeMillis() - start;
-                    log.info("[OrderProducer] 발행 완료 - orderId: {}, partition: {}, offset: {}, {}ms",
-                        event.getOrderId(),
+                    log.info("[OrderProducer] 발행 완료 - partition: {}, offset: {}",
                         result.getRecordMetadata().partition(),
-                        result.getRecordMetadata().offset(),
-                        elapsed);
+                        result.getRecordMetadata().offset());
                 } else {
                     log.error("[OrderProducer] 발행 실패 - orderId: {}", event.getOrderId(), ex);
                 }
