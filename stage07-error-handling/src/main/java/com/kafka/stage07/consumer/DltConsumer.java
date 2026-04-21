@@ -29,7 +29,7 @@ import org.springframework.stereotype.Service;
 public class DltConsumer {
 
     @KafkaListener(
-        topics = "stage07-topic.DLT",   // DLT 토픽 이름: {원본}.DLT (자동 생성)
+        topics = "stage07-topic-dlt",   // DLT 토픽 이름: {원본}-dlt (spring-kafka 4.x 기본값)
         groupId = "stage07-dlt-group"
     )
     public void consumeDlt(ConsumerRecord<String, String> record) {

@@ -47,7 +47,7 @@ public class RetryConsumer {
 
         if (record.value().contains("INVALID")) {
             // NotRetryableException으로 지정된 예외 → 즉시 DLT로 이동
-            throw new IllegalArgumentException("잘못된 데이터 형식 (즉시 DLT): " + record.value());
+            throw new IllegalArgumentException("잘못된 데이터 형식 (즉시 DLT):  " + record.value());
         }
 
         log.info("[Retry Consumer] 처리 성공 - value: {}", record.value());

@@ -376,6 +376,565 @@ Kafka 서버 ≠ 토픽
 
 ---
 
+## 16. 프로듀서 파티션 선택 전략
+
+Kafka 프로듀서가 "어느 파티션으로 보낼지" 결정하는 방식은 5가지다.
+
+---
+
+### 방식 1: 직접 파티션 지정
+
+```java
+kafkaTemplate.send("topic", partition, key, value);
+// 또는
+new ProducerRecord<>("topic", 2, key, value); // partition=2 고정
+```
+
+* 파티션 번호를 코드에서 명시적으로 지정
+* 파티셔너 로직 자체를 건너뜀
+* 특정 파티션에 특수 목적 데이터를 넣을 때 사용
+* **주의**: 파티션 수 변경 시 코드도 함께 수정해야 함
+
+---
+
+### 방식 2: 키 해시 기반 (Key-based)
+
+```java
+kafkaTemplate.send("topic", userId, message);
+```
+
+```
+파티션 = murmur2(key) % partitionCount
+```
+
+* key가 있으면 항상 동일한 파티션 → **같은 key는 순서 보장**
+* 같은 userId의 이벤트(주문생성 → 결제 → 배송)가 항상 같은 파티션에 들어감
+* 핫 파티션 주의: 특정 key가 압도적으로 많으면 편중 발생
+
+```
+user-1 → P0
+user-2 → P2
+user-3 → P1
+user-1 → P0 (항상 같은 파티션)
+```
+
+---
+
+### 방식 3: Sticky Partitioner (키 없는 기본 동작)
+
+```java
+kafkaTemplate.send("topic", message); // key = null
+```
+
+* **Kafka 2.4+의 기본 동작** (key=null일 때)
+* 배치 하나가 꽉 차거나 `linger.ms`가 만료될 때까지 같은 파티션에 계속 전송
+* 배치가 전송되면 다음 파티션으로 이동 (랜덤 선택)
+* RoundRobin보다 배치 효율이 높아 처리량이 좋음
+
+```
+배치1: NoKey-1, NoKey-2, NoKey-3 → P2 (배치 전송)
+배치2: NoKey-4, NoKey-5, NoKey-6 → P0 (다음 파티션)
+배치3: NoKey-7, NoKey-8, NoKey-9 → P1
+```
+
+> **bulk-no-key로 9개를 보내도 P2에만 들어가는 이유**
+> 9개가 루프 내에서 너무 빠르게 생성되어 하나의 배치로 묶임
+> → Sticky Partitioner가 배치 단위로 파티션을 고르므로 전부 같은 파티션으로 전송됨
+
+---
+
+### 방식 4: RoundRobin Partitioner
+
+```yaml
+# application.yml
+spring:
+  kafka:
+    producer:
+      properties:
+        partitioner.class: org.apache.kafka.clients.producer.RoundRobinPartitioner
+```
+
+* key가 없을 때 메시지마다 파티션을 순서대로 돌아가며 선택
+* 균등 분산이 목적일 때 사용
+* 배치 효율은 Sticky보다 낮음 (메시지마다 다른 파티션 → 배치 분산)
+
+```
+NoKey-1 → P0
+NoKey-2 → P1
+NoKey-3 → P2
+NoKey-4 → P0 (순환)
+```
+
+---
+
+### 방식 5: 커스텀 파티셔너
+
+```java
+public class CustomPartitioner implements Partitioner {
+    @Override
+    public int partition(String topic, Object key, byte[] keyBytes,
+                         Object value, byte[] valueBytes, Cluster cluster) {
+        int partitionCount = cluster.partitionCountForTopic(topic);
+        // 비즈니스 로직으로 파티션 결정
+        String msg = (String) value;
+        if (msg.startsWith("VIP")) return 0; // VIP는 항상 P0
+        return 1 + (Math.abs(msg.hashCode()) % (partitionCount - 1));
+    }
+}
+```
+
+```yaml
+spring:
+  kafka:
+    producer:
+      properties:
+        partitioner.class: com.example.CustomPartitioner
+```
+
+* 비즈니스 규칙으로 파티션을 직접 제어
+* VIP 우선 처리, 지역별 분배 등 특수 요구사항에 활용
+
+---
+
+### partitioner.ignore.keys 옵션
+
+```yaml
+spring:
+  kafka:
+    producer:
+      properties:
+        partitioner.ignore.keys: true
+```
+
+* key가 있어도 키 해시를 무시하고 Sticky/RoundRobin 방식으로 파티션 선택
+* key는 메시지 식별용으로만 쓰고 파티션은 균등 분산하고 싶을 때 사용
+
+---
+
+### Kafka 버전별 변경 사항
+
+#### Kafka 4.0 (Breaking Change)
+
+| 변경 내용 | 설명 |
+|-----------|------|
+| `DefaultPartitioner` 제거 | 별도 클래스 없이 프로듀서 내부에 기본 동작 통합 |
+| `UniformStickyPartitioner` 제거 | Sticky 동작이 기본값으로 내장되어 별도 클래스 불필요 |
+
+* Kafka 4.0 이전에는 `partitioner.class`를 명시하지 않으면 `DefaultPartitioner`가 사용됨
+* Kafka 4.0부터는 프로듀서 내부 로직으로 통합 — key 유무에 따라 자동 분기
+
+#### 버전별 key=null 기본 동작
+
+| 버전 | key=null 기본 동작 |
+|------|-------------------|
+| Kafka 2.3 이하 | RoundRobin |
+| Kafka 2.4 ~ 3.x | Sticky Partitioner (DefaultPartitioner 내장) |
+| Kafka 4.0+ | Sticky 동작 내장 (DefaultPartitioner 클래스 제거) |
+
+---
+
+### 5가지 방식 비교 요약
+
+| 방식 | key 필요 | 순서 보장 | 균등 분산 | 사용 시점 |
+|------|---------|----------|----------|----------|
+| 직접 파티션 지정 | 선택 | 파티션 내 보장 | X | 특정 파티션 강제 |
+| 키 해시 기반 | O | 같은 key끼리 보장 | key 분포에 따라 다름 | 순서가 중요한 이벤트 |
+| Sticky | X | X | 배치 단위 분산 | 기본값, 처리량 우선 |
+| RoundRobin | X | X | O | key 없이 균등 분산 |
+| 커스텀 파티셔너 | 선택 | 로직에 따라 | 로직에 따라 | 비즈니스 규칙 필요 시 |
+
+---
+
+## 17. Kafka를 쓰는 이유 (동기 vs 비동기)
+
+### 동기 방식의 문제
+
+```
+OrderService → InventoryService (200ms) → NotificationService (300ms)
+총 응답시간: 500ms 이상 (순차 블로킹)
+```
+
+```
+[문제 1] 장애 전파: 알림 서비스 장애가 주문 서비스 실패로 이어짐
+[문제 2] 응답 지연: 독립적인 작업을 순차 실행
+[문제 3] 강한 결합: 새 서비스 추가 시 OrderService 코드 수정 필요
+[문제 4] 확장 어려움: 트래픽 증가 시 모든 서비스가 함께 부하 증가
+```
+
+### Kafka 도입 후
+
+```
+OrderService → Kafka 이벤트 발행 (5ms) → 즉시 응답 반환
+
+이후 비동기로:
+InventoryService → 이벤트 소비
+NotificationService → 이벤트 소비 (독립적으로)
+```
+
+```
+응답시간: 500ms → 5ms
+결합도: 강결합 → 느슨한 결합
+확장성: 서비스별 독립 확장 가능
+```
+
+---
+
+## 18. Spring Boot 4.0 Kafka 설정 변화
+
+### @EnableKafka 필수
+
+```java
+@EnableKafka   // 없으면 @KafkaListener가 동작하지 않음
+@Configuration
+public class KafkaConfig { ... }
+```
+
+### Bean 수동 정의 필수
+
+Spring Boot 4.0부터 Kafka 자동 설정이 제거됨 → `ProducerFactory`, `ConsumerFactory`, `KafkaTemplate`, `ConcurrentKafkaListenerContainerFactory`를 모두 `@Configuration`에서 직접 정의해야 한다.
+
+### 권장 Producer 설정
+
+```java
+config.put(ProducerConfig.ACKS_CONFIG, "all");         // 모든 레플리카 수신 확인
+config.put(ProducerConfig.RETRIES_CONFIG, 3);           // 전송 실패 시 3회 재시도
+config.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true); // 중복 발행 방지
+```
+
+### KafkaTemplate 비동기 전송 패턴
+
+```java
+CompletableFuture<SendResult<String, String>> future = kafkaTemplate.send(TOPIC, key, value);
+
+future.whenComplete((result, ex) -> {
+    if (ex == null) {
+        int partition = result.getRecordMetadata().partition();
+        long offset = result.getRecordMetadata().offset();
+        log.info("전송 성공 - partition: {}, offset: {}", partition, offset);
+    } else {
+        log.error("전송 실패", ex);
+    }
+});
+```
+
+* `send()`는 즉시 반환 (non-blocking)
+* 전송 결과는 콜백(`whenComplete`)으로 확인
+
+---
+
+## 19. JSON 직렬화
+
+### spring-kafka 4.0 클래스명 변경
+
+| 구버전 (3.x 이하) | 신버전 (4.0+) |
+|------------------|--------------|
+| `JsonSerializer` | `JacksonJsonSerializer` |
+| `JsonDeserializer` | `JacksonJsonDeserializer` |
+
+```yaml
+spring:
+  kafka:
+    producer:
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+    consumer:
+      value-deserializer: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.example.dto"
+```
+
+### @NoArgsConstructor 필수
+
+```java
+@NoArgsConstructor   // ← Jackson 역직렬화 필수 (없으면 역직렬화 실패)
+@AllArgsConstructor
+@Builder
+@Getter
+public class OrderEvent {
+    private String orderId;
+    private String userId;
+    ...
+}
+```
+
+역직렬화 흐름:
+```
+byte[] → JSON 문자열 → ObjectMapper → 기본 생성자로 객체 생성 → 필드 주입
+                                       ↑ @NoArgsConstructor 없으면 여기서 실패
+```
+
+### containerFactory 명시
+
+JSON 타입을 사용하는 `@KafkaListener`는 `containerFactory`를 반드시 지정해야 한다.
+
+```java
+@KafkaListener(
+    topics = "order-events",
+    groupId = "order-group",
+    containerFactory = "orderEventListenerContainerFactory"  // 명시 필수
+)
+public void consume(OrderEvent event) { ... }
+```
+
+---
+
+## 20. 이벤트 설계 원칙
+
+```
+[원칙 1] 과거형 이름: OrderCreated (O)  /  CreateOrder (X)
+[원칙 2] 불변성: setter 없음, final 필드
+[원칙 3] 충분한 정보: Consumer가 추가 DB 조회 없이 처리 가능하도록 필드 포함
+[원칙 4] 추적 ID 포함: 이벤트 체인에서 원본 ID를 다음 이벤트에 전달
+[원칙 5] 버전 관리: 필드 추가는 OK, 필드 삭제/타입 변경은 하위 호환성 고려
+```
+
+### 이벤트 체인에서 추적 ID
+
+```
+OrderEvent  { orderId }
+    ↓
+PaymentEvent  { paymentId, orderId }          ← orderId 포함
+    ↓
+DeliveryEvent { deliveryId, paymentId, orderId }  ← 체인 전체 추적 가능
+```
+
+---
+
+## 21. AckMode 종류
+
+수동 커밋 사용 시 `AckMode`로 커밋 시점을 제어한다.
+
+```java
+factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
+```
+
+| AckMode | 커밋 시점 |
+|---------|---------|
+| `RECORD` | 메시지 1건 처리 후 자동 커밋 |
+| `BATCH` | poll()로 받은 배치 전체 처리 후 자동 커밋 |
+| `MANUAL` | `acknowledge()` 호출 시 다음 배치 처리 후 커밋 |
+| `MANUAL_IMMEDIATE` | `acknowledge()` 호출 즉시 커밋 |
+
+### Auto Commit의 메시지 유실 시나리오
+
+```
+Time 0s: offset 5 메시지 poll
+Time 1s: 처리 중 (DB 저장 시도)
+Time 3s: [자동 커밋] offset 6으로 커밋 완료 ← 아직 처리 중인데!
+Time 4s: 처리 실패, Consumer 재시작
+Time 5s: offset 6부터 읽기 시작
+결과: offset 5 메시지 영원히 유실
+```
+
+### Manual Commit의 중복 처리 시나리오
+
+```
+Time 0: offset 5 처리 완료
+Time 1: acknowledge() 호출 직전 Consumer 크래시
+Time 2: Consumer 재시작 → offset 5부터 다시 읽음
+결과: offset 5 메시지 중복 처리
+```
+
+→ 해결책: **멱등성 설계** (같은 메시지를 두 번 처리해도 결과가 동일)
+
+```java
+// 나쁜 예: INSERT는 중복 시 에러 또는 데이터 중복
+repository.save(event);
+
+// 좋은 예: orderId 기준 upsert로 멱등성 보장
+repository.findByOrderId(event.getOrderId())
+    .orElseGet(() -> repository.save(event));
+```
+
+---
+
+## 22. 에러 핸들링 (DefaultErrorHandler + DLT)
+
+### 구성 요소
+
+```java
+@Bean
+public DefaultErrorHandler errorHandler(KafkaTemplate<String, String> kafkaTemplate) {
+    // 실패 메시지를 DLT로 전송하는 Recoverer
+    DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(kafkaTemplate);
+
+    // 재시도 전략 설정
+    FixedBackOff backOff = new FixedBackOff(1000L, 3L); // 1초 간격, 최대 3회
+
+    DefaultErrorHandler handler = new DefaultErrorHandler(recoverer, backOff);
+
+    // 재시도 없이 즉시 DLT로 보낼 예외 지정
+    handler.addNotRetryableExceptions(IllegalArgumentException.class);
+    return handler;
+}
+```
+
+```java
+// containerFactory에 등록
+factory.setCommonErrorHandler(errorHandler);
+```
+
+### 처리 흐름
+
+```
+예외 발생 → NotRetryable?
+    ├── Yes → 즉시 DLT 이동
+    └── No  → 재시도 (BackOff 간격으로)
+                 ├── 성공 → 정상 처리
+                 └── 모두 실패 → DLT 이동
+```
+
+### NotRetryable 예외 선택 기준
+
+```
+재시도할 가치 없음 (NotRetryable):
+  → JSON 형식 오류, 데이터 검증 실패, 코드 버그
+
+재시도할 가치 있음:
+  → DB 연결 실패, 외부 API 타임아웃, 일시적 네트워크 오류
+```
+
+### DLT 토픽 이름
+
+```
+원본 토픽: stage07-topic
+DLT 토픽:  stage07-topic-dlt  ← 자동 생성
+```
+
+| spring-kafka 버전 | DLT 접미사 |
+|------------------|-----------|
+| 2.x ~ 3.x        | `.DLT`    |
+| 4.x+             | `-dlt`    |
+
+### DLT 목적지 결정 방식
+
+`DeadLetterPublishingRecoverer` 내부에 `destinationResolver`가 기본값으로 내장되어 있다.
+
+```java
+// spring-kafka 4.x 내부 기본 resolver
+(record, exception) -> new TopicPartition(record.topic() + "-dlt", record.partition())
+```
+
+`@KafkaListener`가 어느 토픽을 구독하는지는 전혀 영향을 주지 않는다.
+recoverer가 독립적으로 목적지를 결정해서 전송한다.
+
+목적지를 직접 지정하려면 두 번째 인자로 커스텀 resolver를 넘기면 된다.
+
+```java
+new DeadLetterPublishingRecoverer(kafkaTemplate,
+    (record, ex) -> new TopicPartition("my-custom-dlt", record.partition())
+);
+```
+
+### @KafkaListener와 토픽 자동 생성
+
+`@KafkaListener`에 토픽 이름을 선언하는 것은 구독 선언일 뿐, Spring이 토픽을 생성하지는 않는다.
+하지만 컨슈머가 구독을 시작할 때 브로커에 메타데이터 요청을 보내고, 브로커의
+`auto.create.topics.enable=true`(기본값)에 의해 해당 토픽이 자동 생성된다.
+
+```
+앱 시작
+  → @KafkaListener가 "stage07-topic.DLT" 구독 시도
+  → 브로커에 메타데이터 요청
+  → 브로커: 없는 토픽 + auto.create.topics.enable=true
+  → stage07-topic.DLT 토픽 자동 생성 (빈 토픽)
+```
+
+잘못된 토픽 이름으로 구독하면 두 토픽이 동시에 만들어지는 상황이 발생한다.
+
+```
+stage07-topic.DLT  ← @KafkaListener 구독 시도로 생성 (메시지 없음, 빈 토픽)
+stage07-topic-dlt  ← DeadLetterPublishingRecoverer가 메시지 전송하며 생성 (실제 DLT 메시지)
+```
+
+컨슈머는 빈 토픽만 바라보고, 실제 실패 메시지는 다른 토픽에 쌓이는 무증상 버그가 된다.
+
+### DLT 메시지 헤더 활용
+
+```java
+@KafkaListener(topics = "stage07-topic-dlt", groupId = "dlt-group")
+public void consumeDlt(ConsumerRecord<String, String> record) {
+    String originalTopic   = getHeader(record, "kafka_dlt-original-topic");
+    String originalOffset  = getHeader(record, "kafka_dlt-original-offset");
+    String exceptionClass  = getHeader(record, "kafka_dlt-exception-fqcn");
+    String exceptionMsg    = getHeader(record, "kafka_dlt-exception-message");
+
+    // 실무: DB 저장 → 알림 발송 → 수동 재처리 대기열 등록
+}
+```
+
+---
+
+## 23. 재시도 전략
+
+### FixedBackOff
+
+```java
+new FixedBackOff(1000L, 3L);
+// 1초 간격으로 최대 3회 재시도
+// 1초 → 1초 → 1초
+```
+
+### ExponentialBackOff
+
+```java
+ExponentialBackOff backOff = new ExponentialBackOff(1000L, 2.0);
+backOff.setMaxAttempts(3);
+// 지수적으로 증가
+// 1초 → 2초 → 4초
+```
+
+| 전략 | 간격 | 사용 시점 |
+|------|------|---------|
+| FixedBackOff | 일정 | 단순한 재시도, 빠른 복구 기대 |
+| ExponentialBackOff | 지수 증가 | 외부 API, DB 등 부하 분산 필요 시 권장 |
+
+---
+
+## 24. 다중 토픽 & 이벤트 체인
+
+### 타입별 Factory 분리
+
+토픽마다 메시지 타입이 다른 경우 각각 별도의 Factory와 KafkaTemplate을 정의한다.
+
+```java
+// OrderEvent용
+@Bean ProducerFactory<String, OrderEvent> orderProducerFactory() { ... }
+@Bean KafkaTemplate<String, OrderEvent> orderKafkaTemplate() { ... }
+@Bean ConsumerFactory<String, OrderEvent> orderConsumerFactory() { ... }
+@Bean ConcurrentKafkaListenerContainerFactory<String, OrderEvent> orderListenerFactory() { ... }
+
+// PaymentEvent용
+@Bean ProducerFactory<String, PaymentEvent> paymentProducerFactory() { ... }
+@Bean KafkaTemplate<String, PaymentEvent> paymentKafkaTemplate() { ... }
+// ... 동일한 패턴 반복
+```
+
+### Consumer가 Producer가 되는 패턴
+
+```
+[OrderConsumer]
+  → 주문 저장
+  → PaymentEvent 발행  ← Consumer이면서 동시에 Producer
+
+[PaymentConsumer]
+  → 결제 처리
+  → DeliveryEvent 발행
+
+[DeliveryConsumer]
+  → 배송 처리 (최종)
+```
+
+### Producer 멱등성 설정
+
+```java
+config.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
+```
+
+* 네트워크 재시도 시 Broker가 중복 메시지를 감지하고 하나만 저장
+* `acks=all` + `retries > 0`과 함께 사용해야 효과 있음
+
+---
+
 # 🚀 최종 핵심 정리
 
 ```
