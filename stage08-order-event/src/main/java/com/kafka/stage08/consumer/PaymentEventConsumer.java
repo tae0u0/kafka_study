@@ -52,7 +52,7 @@ public class PaymentEventConsumer {
                 .orderId(payment.getOrderId())
                 .paymentId(payment.getPaymentId())
                 .userId(payment.getUserId())
-                .shippingAddress("서울시 강남구")   // 실제로는 OrderEvent에서 가져옴
+                .shippingAddress(payment.getShippingAddress())
                 .status("DELIVERY_REQUESTED")
                 .requestedAt(LocalDateTime.now())
                 .build();

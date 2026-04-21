@@ -54,6 +54,7 @@ public class OrderEventConsumer {
                 .amount(order.getTotalPrice())
                 .paymentMethod("CARD")
                 .status("PAYMENT_REQUESTED")
+                .shippingAddress(order.getShippingAddress())
                 .requestedAt(LocalDateTime.now())
                 .build();
 

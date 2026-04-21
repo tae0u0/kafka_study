@@ -954,3 +954,161 @@ group-id는 소비 방식,
 partition은 병렬 처리,
 concurrency는 처리 속도를 결정한다
 ```
+
+1. 문제 상황
+
+Kafka 이벤트 처리 과정에서 다음과 같은 문제가 발생했다.
+
+ObjectMapper 바인딩 관련 컴파일 오류
+JacksonJsonDeserializer(Class<T>, ObjectMapper) 생성자 미지원
+Consumer 처리 실패 후 무한 retry
+로그 반복
+Record in retry and not yet recovered
+Seeking to offset 0 for partition order-events-1
+2. ObjectMapper 관련 이슈
+   2.1 기존 접근 방식
+   @Autowired
+   private ObjectMapper objectMapper;
+
+private <T> JacksonJsonSerializer<T> jsonSerializer() {
+return new JacksonJsonSerializer<>(objectMapper);
+}
+
+private <T> JacksonJsonDeserializer<T> deserializer(Class<T> targetType) {
+return new JacksonJsonDeserializer<>(targetType, objectMapper);
+}
+
+👉 의도
+
+Spring Boot가 제공하는 ObjectMapper 사용
+LocalDateTime 정상 직렬화 (ISO-8601)
+2.2 발생한 문제
+생성자 'JacksonJsonDeserializer(Class<T>, ObjectMapper)'을(를) 해결할 수 없습니다
+
+👉 원인
+
+현재 사용 중인 Spring Kafka 4.x
+해당 생성자가 존재하지 않음
+2.3 버전 차이에 따른 변화
+항목	기존 방식	현재 방식
+ObjectMapper	직접 주입	사용 안 함
+Serializer	new JacksonJsonSerializer<>(objectMapper)	new JacksonJsonSerializer<>()
+Deserializer	new JacksonJsonDeserializer<>(type, objectMapper)	new JacksonJsonDeserializer<>(type)
+기준	Mapper 중심	targetType 중심
+2.4 수정된 코드
+private <T> JacksonJsonSerializer<T> jsonSerializer() {
+JacksonJsonSerializer<T> serializer = new JacksonJsonSerializer<>();
+serializer.setAddTypeInfo(true);
+return serializer;
+}
+
+private <T> JacksonJsonDeserializer<T> deserializer(Class<T> targetType) {
+JacksonJsonDeserializer<T> d = new JacksonJsonDeserializer<>(targetType);
+d.addTrustedPackages("com.kafka.stage08.dto");
+d.setUseTypeHeaders(false);
+return d;
+}
+2.5 핵심 학습 포인트
+
+✔ ObjectMapper 빈 존재 여부 ≠ 사용 가능 여부
+✔ 라이브러리 생성자 시그니처가 더 중요
+✔ 버전 업 시 API 구조 변화 반드시 확인
+
+3. Consumer AckMode 문제
+   3.1 현재 코드
+   factory.getContainerProperties().setAckMode(AckMode.RECORD);
+   public void consume(..., Acknowledgment ack) {
+   ...
+   ack.acknowledge();
+   }
+   3.2 문제 핵심
+   설정	코드
+   자동 커밋 (RECORD)	수동 커밋 사용
+
+👉 서로 충돌
+
+3.3 결과
+메시지 처리 성공
+→ ack 호출 시 예외
+→ retry 발생
+→ offset rollback
+→ 다시 consume
+→ 무한 반복
+3.4 해결 방법
+✅ 방법 1 (추천): 자동 커밋 유지
+public void consume(ConsumerRecord<String, OrderEvent> record) {
+...
+}
+
+✔ Acknowledgment 제거
+
+방법 2: 수동 커밋 사용
+factory.getContainerProperties().setAckMode(AckMode.MANUAL);
+
+✔ 이 경우만 ack.acknowledge() 사용
+
+3.5 선택 이유 (포트폴리오 기준)
+
+👉 AckMode.RECORD + 자동 커밋 추천
+
+구조 단순
+설명 쉬움
+retry 흐름 명확
+실습/포폴에 적합
+4. retry 무한 루프 원인 정리
+   offset 0 계속 재조회
+   → 처리 실패
+   → retry
+   → offset commit 안됨
+   → 다시 읽음
+
+👉 핵심 원인
+
+AckMode 설정 불일치
+ack 호출 시 예외 발생
+5. 최종 정리
+   ✔ ObjectMapper
+   직접 주입 ❌
+   기본 생성자 사용 ⭕
+   ✔ Kafka Consumer
+   AckMode와 코드 일치해야 함
+   자동 커밋이면 ack 사용 ❌
+   수동 커밋이면 AckMode 변경 필수
+6. 적용 결과
+   컴파일 오류 해결
+   JSON 역직렬화 정상 동작
+   retry 루프 제거
+   Kafka 이벤트 흐름 안정화
+7. 회고
+
+이번 트러블슈팅을 통해 다음을 학습했다.
+
+1. 라이브러리 버전이 설계를 바꾼다
+
+단순 설정 문제가 아니라
+👉 API 구조 자체가 바뀐 문제
+
+2. Kafka는 "설정 + 코드"가 세트다
+
+특히 중요 👇
+
+AckMode
+Listener 시그니처
+ErrorHandler
+
+👉 하나라도 어긋나면 retry 지옥
+
+3. 진짜 원인 찾는 기준
+   Record in retry and not yet recovered
+
+이 로그 나오면 무조건:
+
+역직렬화 문제
+비즈니스 예외
+ack 문제
+
+👉 이 3개부터 본다
+
+🚀 한 줄 정리
+
+Kafka 문제는 대부분 “데이터 문제가 아니라 설정-코드 불일치”에서 시작된다.

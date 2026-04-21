@@ -24,10 +24,11 @@ import java.time.LocalDateTime;
 public class PaymentEvent {
 
     private String paymentId;
-    private String orderId;       // 원본 주문 ID (추적용)
+    private String orderId;         // 원본 주문 ID (추적용)
     private String userId;
     private long amount;
-    private String paymentMethod; // CARD, BANK_TRANSFER, POINT
-    private String status;        // PAYMENT_REQUESTED, PAYMENT_COMPLETED, PAYMENT_FAILED
+    private String paymentMethod;   // CARD, BANK_TRANSFER, POINT
+    private String status;          // PAYMENT_REQUESTED, PAYMENT_COMPLETED, PAYMENT_FAILED
+    private String shippingAddress; // 배송 이벤트로 전달하기 위해 보관
     private LocalDateTime requestedAt;
 }
